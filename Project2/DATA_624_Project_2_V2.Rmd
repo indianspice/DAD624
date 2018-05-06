@@ -1,0 +1,365 @@
+---
+title: "Project 2"
+author: "Group 3"
+date: "March 11, 2018"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+```{r, message=FALSE, warning=FALSE}
+# import required packages
+library(xlsx)
+library(tidyverse)
+library(caret)
+library(forecast)
+library(pander)
+library(mice)
+library(VIM)
+library(reshape)
+library(ggplot2)
+library(psych)
+library(DataExplorer)
+library(GGally)
+library(knitr)
+
+```
+
+#Random seed
+```{r}
+# define random seed
+randomSeed<-1234567
+
+```
+
+## Data Acquisition
+
+```{r}
+# define input/output variables
+baseURL <- "https://raw.githubusercontent.com/jzuniga123"
+file1URL<-"/SPS/master/DATA%20624/StudentData.xlsx"
+file2URL<-"/SPS/master/DATA%20624/StudentEvaluation-%20TO%20PREDICT.xlsx"
+outputDirectory <- "~/"
+inputFileName<-"StudentData.xlsx"
+outputFileName<-"StudentEvaluation-PREDICT.xlsx"
+# define full input file name
+fullInputFileName<-paste0(outputDirectory,
+                          inputFileName)
+# define full output file name
+fullOutputFileName<-paste0(outputDirectory,
+                           outputFileName)
+
+```
+
+
+## Data Loading
+```{r, message=FALSE, warning=FALSE, cache=TRUE}
+# Download inSampleData
+temp.file <- paste(tempfile(),".xlsx",sep = "")
+download.file(paste0(baseURL, file1URL),temp.file, mode="wb")
+inSampleData<-xlsx::read.xlsx(temp.file, sheetIndex=1, header=T)
+
+# Download outSampleData
+temp.file <- paste(tempfile(),".xlsx",sep = "")
+download.file(paste0(baseURL, file2URL),temp.file, mode="wb")
+outOfSampleData <-xlsx::read.xlsx(temp.file, sheetIndex=1, header=T)
+
+```
+
+
+#To be removed
+```{r, cache=TRUE}
+'# read input file (xlsx)
+inSampleData <- xlsx::read.xlsx(fullInputFileName, 
+  sheetIndex=1, header=T)
+# read output file (xlsx)
+outOfSampleData <- xlsx::read.xlsx(fullOutputFileName, 
+  sheetIndex=1, header=T)
+# remove input file name (xlsx)
+#invisible(file.remove(fullInputFileName))
+# remove output file (xlsx)
+#invisible(file.remove(fullOutputFileName))'
+
+```
+
+
+
+```{r}
+# find number of observations of each predictor
+nObservations<-dim(inSampleData)[1]
+# find number of predictors
+nPredictors<-dim(inSampleData %>% select(-PH))[2]
+
+```
+
+In additional to the response variable, the data set contains `r nPredictors` predictors, each with `r nObservations` observations.
+##Distributions
+###Skewness and outliers
+Examining skewness and outliers in the data is important prior to choosing the model. This is important because some models will require transformation of the data.
+
+As seen below in the density matrix and boxplots, several variables are skewed. Four of the sixteen variables are normally or close to mormally distributed.
+```{r, message=FALSE, warning=FALSE}
+par(mfrow = c(3, 3))
+
+student_data1 = melt(inSampleData)
+ggplot(student_data1, aes(x= value)) + 
+    geom_density(fill='red') + facet_wrap(~variable, scales = 'free') 
+
+#Box plat matrix
+par(mfrow = c(3, 3))
+
+student_data_box = melt(inSampleData)
+ggplot(student_data_box, mapping = aes(x= "", y = value)) + 
+    geom_boxplot(fill="red") + facet_wrap(~variable, scales = 'free')
+```
+##Data Structure
+```{r, message=FALSE, warning=FALSE}
+plot_str(inSampleData)
+```
+#Descriptive Statistics
+```{r, message=FALSE, warning=FALSE}
+#summary stats
+data_tbl<-psych::describe(inSampleData[,-1],IQR=T)[,c(1:5,8:10,11,12)]
+knitr::kable(round(data_tbl,2), caption = "Selected Stats")
+rm(data_tbl)
+```
+
+##Correlation Matrix
+```{r, message=FALSE, warning=FALSE}
+ggcorr(inSampleData, nbreaks=8, palette='PRGn', label=TRUE, 
+       label_size=2, size = 1.8, label_color='black') + ggtitle("Correlation Matrix") + theme(plot.title = element_text(hjust = 0.5, color = "grey15"))
+```
+##Multicollinearity
+This section will test the predictor variables to determine if there is correlation among them. Variance inflaction factor (VIF) is used to detect multicollinearity, specifically among the entire set of predictors versus within pairs of variables.
+
+Testing for collinearity among the predictor variables, we see that none of the numeric predictor variables appear to have a problem with collinearity based on their low VIF scores.
+```{r, message=FALSE, warning=FALSE}
+numeric_fields <- dplyr::select_if(inSampleData, is.numeric)[, 3:15]
+
+usdm::vifcor(numeric_fields)
+```
+##Missing Values
+```{r, message=FALSE, warning=FALSE}
+plot_missing(inSampleData, title="Evaluate - Missing Values (%)")
+```
+## Preprocessing
+
+In this section, we split the data into training and test sets, then pre-process the data.
+
+[blurb about limitations of numerical encoding / justification for dummy variables]
+
+```{r}
+# drop NAs from the response variable
+inSampleDataRmNA <- inSampleData %>% drop_na(PH)
+# configure replacement of categorical variables with dummy variables
+dummyVariables <- dummyVars(" ~ .", data = inSampleDataRmNA,fullRank=T)
+# replace categorical variables with dummy variables
+inSampleDataRmNADv <- data.frame(predict(dummyVariables, 
+  newdata = inSampleDataRmNA))
+# extract response
+response <- inSampleDataRmNADv %>% select(PH)
+# extract predictors
+predictors <- inSampleDataRmNADv %>% select(-PH)
+
+```
+
+
+
+```{r}
+# find number of observations of each predictor
+nObservationsRmNA<-dim(predictors)[1]
+# find number of predictors
+nPredictorsRmNA<-dim(predictors)[2]
+```
+
+After removing `r (nObservations-nObservationsRmNA)` rows corresponding to missing values of the response variable, `r nObservationsRmNA` observations for each of the `r nPredictorsRmNA` predictors remain for the development of our predictive model. [Explain extra predictors from dummy variable]
+
+
+```{r}
+# set training percent
+trainPercent<-0.75
+
+```
+
+
+We split the data into training (`r trainPercent*100`%) and test sets (`r (1-trainPercent)*100`%):
+
+```{r}
+# define random seed
+set.seed(randomSeed)
+# create training set index
+trainIndex<-createDataPartition(response$PH,p=trainPercent,list=FALSE)
+# extract training set
+inSampleDataRmNATrain<-inSampleDataRmNA[trainIndex,]
+# extract test set
+inSampleDataRmNATest<-inSampleDataRmNA[-trainIndex,]
+# extract training set
+inSampleDataRmNADvTrain<-inSampleDataRmNADv[trainIndex,]
+# extract test set
+inSampleDataRmNADvTest<-inSampleDataRmNADv[-trainIndex,]
+# extract predictor training set
+predictorsTrain<-predictors[trainIndex,]
+# extract predictor test set
+predictorsTest<-predictors[-trainIndex,]
+# extract response test set
+responseTrain<-response[trainIndex,]
+# extract response training set
+responseTest<-response[-trainIndex,]
+
+```
+
+
+## Data Exploration
+
+So as not to inadvertently exploit information from the testing set in our model buiding, we explore only the training set.
+
+
+```{r}
+# find number missing predictors
+nMissingPredictorsTrain<-sum(is.na(predictorsTrain))
+# find number of observations of each predictor
+nObservationsTrain<-dim(predictorsTrain)[1]
+# find number of predictors
+nPredictorsTrain<-dim(predictorsTrain)[2]
+# find total number of values
+totalNTrain<-nObservationsTrain*nPredictorsTrain
+# frequency of missing data
+missingFrequencyTrain<-round((nMissingPredictorsTrain/totalNTrain)*100,2)
+
+```
+
+
+
+We observe a missing frequency of only `r missingFrequencyTrain`% in the training set. The distribution of missing values across the predictors is shown in the table immediately below.
+
+```{r Frequency}
+# find missing counts and frequency (%)
+missingFrequencyOfTotalByPredictorTable <- predictorsTrain %>% 
+  # extract values by predictor
+  gather(predictorLabel,value) %>%
+  # group by predictor
+  group_by(predictorLabel) %>% 
+  # count missing values by predictor
+  summarize(missingCount=sum(is.na(value))) %>% 
+  # convert count to frequency
+  mutate(missingFrequency=missingCount/totalNTrain) %>% 
+  # sort by missing frequency
+  arrange(desc(missingFrequency))
+
+```
+
+**Missing Values By Predictor (Proportion Of Total Frequency)**
+
+`r pander(missingFrequencyOfTotalByPredictorTable)`
+
+```{r,results=FALSE}
+# define missing value color
+notMissingColor<-"navyblue"
+# define not missing value color
+missingColor<-"red"
+# create missing value visualization
+aggr(predictorsTrain, sortVars = TRUE, bar = FALSE, prop = FALSE, 
+  gap = 1, cex.axis = 0.7,col = c(notMissingColor, missingColor), 
+  ylab = c("Count of Missing Values", "Observation Index"))
+
+```
+
+
+```{r,fig.height = 11, fig.width = 8}
+# set number of bins
+nBins<-20
+# plot distribution before i
+inSampleDataRmNATrain %>% 
+  select(-Brand.Code) %>% 
+  gather(Variable, Values) %>% 
+  ggplot(aes(x = Values)) +
+  geom_histogram(alpha = 0.25, col = "black", bins = nBins) +
+  facet_wrap(~ Variable, scales = "free", nrow = 8)
+
+```
+
+
+```{r,fig.height = 11, fig.width = 8}
+inSampleDataRmNATrain %>% 
+  gather(-PH, -Brand.Code, key="Var", value="Value") %>% 
+  ggplot(aes(x=Value, y=PH, color=Brand.Code)) +
+  geom_point(alpha=0.6) +
+  facet_wrap(~ Var, scales = "free", nrow=8)
+
+```
+
+We preprocess the data (imputing missing values with k-nearest neighbors, filtering near-zero variance predictors, then applying the Box-Cox, centering, and scaling transformations):
+
+```{r}
+# define preprocess methods
+preprocessMethods<-c('knnImpute','center','scale','BoxCox','nzv')
+# set up preprocessor using only training set
+predictorsPreprocessorTrain<-preProcess(predictorsTrain,
+  method=preprocessMethods)
+# apply preprocessing to training and test set
+# transform predictors (training set)
+predictorsTrainTransformed<-predict(predictorsPreprocessorTrain,
+  predictorsTrain)
+# transform predictors (test set)
+predictorsTestTransformed<-predict(predictorsPreprocessorTrain,
+  predictorsTest)
+
+```
+
+Notice that we transform using a process that builds the proprecessing using only the training data, then apply that process to the test data.
+
+After our transformation process 
+
+```{r,results=FALSE}
+# define missing value color
+notMissingColor<-"navyblue"
+# define not missing value color
+missingColor<-"red"
+# create missing value visualization
+aggr(predictorsTrainTransformed, sortVars = TRUE, bar = FALSE, 
+  prop = FALSE, gap = 1, cex.axis = 0.7,col = c(notMissingColor, 
+  missingColor), ylab = c("Count of Missing Values", 
+  "Observation Index"))
+
+```
+
+After transformation
+
+```{r,fig.height = 11, fig.width = 8}
+# # set number of bins
+# nBins<-20
+# # plot distribution before i
+# predictorsTrainTransformed %>% 
+#   select(-Brand.Code) %>% 
+#   gather(Variable, Values) %>% 
+#   ggplot(aes(x = Values)) +
+#   geom_histogram(alpha = 0.25, col = "black", bins = nBins) +
+#   facet_wrap(~ Variable, scales = "free", nrow = 8)
+
+```
+
+
+
+
+As with the preprocessing step, we explore only the training data
+
+
+```{r}
+# predictorsTrainTransformed
+
+```
+
+
+
+```{r}
+
+# set random seed
+set.seed(randomSeed)
+
+```
+
+
+
+
+
